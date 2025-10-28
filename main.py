@@ -131,9 +131,19 @@ def clean_ocr_text(raw_text):
     """
     extracted_text = raw_text
     system_prompt = """
-    You are an expert OCR text cleaner specializing in banking forms. Your task is to clean and format the raw OCR text to make it more readable and easier to parse for data extraction.
+        You are an OCR text-cleaning expert for banking forms.
+        Clean the raw OCR text to make it readable and well-structured without altering its factual content.
 
-    Fix spacing and line breaks, correct obvious OCR errors, preserve structure, and do not add information. Output plain text only.
+        Instructions:
+
+        - Fix spacing, line breaks, and clear OCR artifacts.
+        - Correct obvious OCR character errors (e.g., 0→O if contextually certain).
+        - Preserve all visible text exactly as written.
+        - Do not infer, assume, or add any information not explicitly present in the original text.
+        - If a field is blank, unreadable, or missing, leave it blank—never guess or fill it in.
+        - Keep the visual structure (headings, sections, labels) as close to the form layout as possible.
+        - Output plain cleaned text only (no explanations, comments, or formatting tags).
+        
     """.strip()
 
     try:
