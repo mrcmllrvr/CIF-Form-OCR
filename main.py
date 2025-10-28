@@ -1,5 +1,5 @@
 # main.py - CIF Form Data Extraction
-# Extracts personal details from DBP Customer Information File Individual forms
+# Extracts personal details from Customer Information File (CIF) Individual forms
 
 import concurrent.futures
 import base64
@@ -22,10 +22,12 @@ import time
 from azure.ai.formrecognizer import DocumentAnalysisClient
 from azure.core.credentials import AzureKeyCredential
 import io
+import hashlib
+import pathlib
 
 load_dotenv()
 
-# Azure OpenAI API endpoint and key
+# --------------------- Config: Azure Endpoints & Keys ---------------------
 endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
 api_key = os.getenv("AZURE_OPENAI_API_KEY")
 if not endpoint or not api_key:
@@ -42,32 +44,42 @@ headers = {
     "api-key": api_key
 }
 
-# --------------------- Image Preprocessing Functions ---------------------
-def convert_pdf_to_images(pdf_path, output_folder):
-    images = convert_from_path(pdf_path)
+# --------------------- Image Helpers ---------------------
+def convert_pdf_to_images(pdf_path, output_folder, dpi=300):
+    """
+    Convert PDF pages to images. Higher DPI preserves small strokes (e.g., 'w').
+    """
+    os.makedirs(output_folder, exist_ok=True)
+    images = convert_from_path(pdf_path, dpi=dpi)
     image_paths = []
     for i, image in enumerate(images):
-        image_path = os.path.join(output_folder, f"{os.path.splitext(os.path.basename(pdf_path))[0]}_page_{i + 1}.png")
+        image_path = os.path.join(
+            output_folder,
+            f"{os.path.splitext(os.path.basename(pdf_path))[0]}_page_{i + 1}.png"
+        )
         image.save(image_path, "PNG")
         image_paths.append(image_path)
     return image_paths, len(images)
 
-def preprocess_image(image):
+def preprocess_image(image: Image.Image) -> Image.Image:
+    """
+    Gentle, optional preprocessing for display/noisy scans ONLY.
+    We do NOT feed this to OCR by default to avoid glyph breakup (e.g., 'w'→'n'+'j').
+    """
     open_cv_image = np.array(image)
     open_cv_image = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2BGR)
     gray = cv2.cvtColor(open_cv_image, cv2.COLOR_BGR2GRAY)
+
+    # (Optional) Crop to largest contour (page); safe in most cases, but not required
     contours, _ = cv2.findContours(gray, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if contours:
         cnts_sorted = sorted(contours, key=lambda x: cv2.contourArea(x), reverse=True)
-        cnt = cnts_sorted[0]
-        x, y, w, h = cv2.boundingRect(cnt)
+        x, y, w, h = cv2.boundingRect(cnts_sorted[0])
         gray = gray[y:y+h, x:x+w]
-    _, thresh = cv2.threshold(gray, 200, 235, cv2.THRESH_BINARY)
-    adaptive_thresh = cv2.adaptiveThreshold(
-        thresh, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 21, 5
-    )
-    processed_image = Image.fromarray(adaptive_thresh)
-    return processed_image
+
+    # Gentler binarization: Otsu (avoids eroding diagonal strokes of 'w')
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return Image.fromarray(thresh)
 
 def convert_image_to_base64(image_path):
     mime_type, _ = guess_type(image_path)
@@ -77,60 +89,60 @@ def convert_image_to_base64(image_path):
         base64_encoded_data = base64.b64encode(image_file.read()).decode("utf-8")
     return f"data:{mime_type};base64,{base64_encoded_data}"
 
-# Handle both PDF and image files
-def process_image_file(image_path, output_folder):
-    base_name = os.path.splitext(os.path.basename(image_path))[0]
-    processed_image_path = os.path.join(output_folder, f"{base_name}_processed.png")
-    image = Image.open(image_path)
-    processed_image = preprocess_image(image)
-    processed_image.save(processed_image_path)
-    return [processed_image_path], 1
-
-# Azure OCR API call to extract raw text from the image
-def get_raw_text(image_data_url):
+# --------------------- Azure Document Intelligence (OCR) ---------------------
+def get_raw_text(image_data_url_or_path, model_name="prebuilt-read"):
+    """
+    Use Azure Document Intelligence to read plain text (prebuilt-read).
+    Accepts either a data URL (data:...;base64,...) or a file path.
+    """
     try:
         client = DocumentAnalysisClient(endpoint=adi_endpoint, credential=AzureKeyCredential(adi_api_key))
-        if image_data_url.startswith('data:'):
-            header, base64_data = image_data_url.split(',', 1)
+
+        if isinstance(image_data_url_or_path, str) and image_data_url_or_path.startswith('data:'):
+            # data URL: decode to bytes
+            _, base64_data = image_data_url_or_path.split(',', 1)
             image_bytes = base64.b64decode(base64_data)
             image_stream = io.BytesIO(image_bytes)
-            poller = client.begin_analyze_document("prebuilt-document", image_stream)
+            poller = client.begin_analyze_document(model_name, image_stream)
             result = poller.result()
-            extracted_text = " ".join([line.content for page in result.pages for line in page.lines])
-            return extracted_text
         else:
-            with open(image_data_url, "rb") as image_file:
-                poller = client.begin_analyze_document("prebuilt-document", image_file)
+            # assume file path
+            with open(image_data_url_or_path, "rb") as image_file:
+                poller = client.begin_analyze_document(model_name, image_file)
                 result = poller.result()
-            extracted_text = result.content
-            return extracted_text
+
+        if hasattr(result, "content") and result.content:
+            return result.content
+
+        # Fallback: join lines
+        extracted_text = " ".join([line.content for page in result.pages for line in page.lines])
+        return extracted_text
+
     except Exception as e:
         print(f"Error analyzing document: {e}")
         import traceback
         traceback.print_exc()
         return None
 
-#--------------------- Text Cleaning Functions ---------------------
-def clean_ocr_text(raw_text, image):
+# --------------------- Text Cleaning (LLM) ---------------------
+def clean_ocr_text(raw_text):
+    """
+    Clean raw OCR text using Azure OpenAI Chat endpoint.
+    """
     extracted_text = raw_text
     system_prompt = """
-    You are an expert OCR text cleaner specializing in Philippine banking forms. Your task is to clean and format the raw OCR text to make it more readable and easier to parse for data extraction.
+    You are an expert OCR text cleaner specializing in banking forms. Your task is to clean and format the raw OCR text to make it more readable and easier to parse for data extraction.
 
     Fix spacing and line breaks, correct obvious OCR errors, preserve structure, and do not add information. Output plain text only.
-    """
+    """.strip()
+
     try:
         data = {
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": extracted_text},
-                        {"type": "image_url", "image_url": {"url": image}},
-                    ],
-                }
+                {"role": "user", "content": extracted_text}
             ],
-            "max_tokens": 4000,
+            "max_tokens": 1200,
             "temperature": 0
         }
         response = requests.post(endpoint, headers=headers, json=data)
@@ -141,7 +153,7 @@ def clean_ocr_text(raw_text, image):
         print(f"Error in OCR text cleaning: {str(e)}")
         return raw_text
 
-# --------------------- Structured Data Functions ---------------------
+# --------------------- Structured Data (LLM) ---------------------
 def parse_structured_response(response_content):
     if isinstance(response_content, dict):
         return response_content
@@ -300,6 +312,7 @@ def get_structured_data_from_text(raw_text):
         Present your final JSON answer in <answer> tags after analysis.
 
     """.strip()
+
     try:
         data = {
             "messages": [
@@ -309,7 +322,7 @@ def get_structured_data_from_text(raw_text):
                     {"type": "text", "text": raw_text}
                 ]}
             ],
-            "max_tokens": 8192,
+            "max_tokens": 3000,
             "temperature": 0.0
         }
         response = requests.post(endpoint, headers=headers, json=data)
@@ -323,6 +336,7 @@ def get_structured_data_from_text(raw_text):
         print(f"Unexpected error: {e}")
     return None
 
+# --------------------- Small helpers ---------------------
 def flatten_json(nested_json):
     flat = {}
     for key, value in nested_json.items():
@@ -363,30 +377,51 @@ def save_to_excel(structured_data_list, excel_output_path):
     print(f"Excel file saved to: {excel_output_path}")
 
 # --------------------- PDF/Image processing ---------------------
+def _hash_file(path):
+    return hashlib.md5(pathlib.Path(path).read_bytes()).hexdigest()
+
 def process_pdf(pdf_file, pdf_folder, image_folder):
+    """
+    Accuracy-first PDF pipeline:
+    - 300 DPI render
+    - OCR the ORIGINAL images (not binarized)
+    - Optional preprocessing is for display only (not used for OCR)
+    - Parallel OCR
+    """
     pdf_path = os.path.join(pdf_folder, pdf_file)
     print(f"Processing PDF: {pdf_file}...")
-    image_paths, page_count = convert_pdf_to_images(pdf_path, image_folder)
+    image_paths, page_count = convert_pdf_to_images(pdf_path, image_folder, dpi=180)
 
-    ocr_responses = []
-    base64_data = None
-    for image_path in image_paths:
-        image = Image.open(image_path)
-        processed_image = preprocess_image(image)
-        processed_image.save(image_path)
+    # ---- OCR pages concurrently on ORIGINAL images
+    def _ocr_one(img_path):
+        b64 = convert_image_to_base64(img_path)
+        return get_raw_text(b64) or ""
 
-        base64_data = convert_image_to_base64(image_path)
-        raw_text_image = get_raw_text(base64_data)
-        if raw_text_image:
-            ocr_responses.append(raw_text_image)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(image_paths))) as ex:
+        ocr_texts = list(ex.map(_ocr_one, image_paths))
 
-    raw_text = "\n".join(ocr_responses)
-    cleaned_text = clean_ocr_text(raw_text, base64_data)
+    raw_text = "\n".join(ocr_texts)
 
+    # ---- (Optional) create processed previews for UI without overwriting originals
+    for img_path in image_paths:
+        try:
+            img = Image.open(img_path)
+            proc = preprocess_image(img)
+            # save a sidecar preview if desired; here we skip writing to avoid confusion
+            # preview_path = img_path.replace(".png", "_proc.png")
+            # proc.save(preview_path)
+        except Exception:
+            pass
+
+    # ---- Clean text (LLM)
+    cleaned_text = clean_ocr_text(raw_text)
+
+    # ---- Persist cleaned text for UI download (same behavior as before)
     os.makedirs('cleaned_text', exist_ok=True)
     with open(f'cleaned_text/{pdf_file.replace(".pdf", "")}.txt', 'w', encoding='utf-8') as file:
         file.write(cleaned_text)
 
+    # ---- Structure data (LLM)
     structured_api_response = get_structured_data_from_text(cleaned_text)
     structured_data = structured_api_response or {}
 
@@ -399,32 +434,43 @@ def process_pdf(pdf_file, pdf_folder, image_folder):
     return structured_data
 
 def process_image(image_file, image_input_folder, image_output_folder):
+    """
+    Single-image path:
+    - OCR the ORIGINAL image
+    - Optional preprocessing for preview only
+    """
     image_path = os.path.join(image_input_folder, image_file)
     print(f"Processing Image: {image_file}...")
-    image_paths, page_count = process_image_file(image_path, image_output_folder)
 
-    ocr_responses = []
-    base64_data = None
-    for processed_image_path in image_paths:
-        base64_data = convert_image_to_base64(processed_image_path)
-        raw_text_image = get_raw_text(base64_data)
-        if raw_text_image:
-            ocr_responses.append(raw_text_image)
+    # OCR original
+    b64 = convert_image_to_base64(image_path)
+    raw_text = get_raw_text(b64) or ""
 
-    raw_text = "\n".join(ocr_responses)
-    cleaned_text = clean_ocr_text(raw_text, base64_data)
+    # Preview (optional)
+    try:
+        base_name = os.path.splitext(os.path.basename(image_path))[0]
+        os.makedirs(image_output_folder, exist_ok=True)
+        img = Image.open(image_path)
+        proc = preprocess_image(img)
+        proc.save(os.path.join(image_output_folder, f"{base_name}_processed.png"))
+    except Exception:
+        pass
 
+    # Clean
+    cleaned_text = clean_ocr_text(raw_text)
+
+    # Persist cleaned text (if app expects it)
     os.makedirs('cleaned_text', exist_ok=True)
-    base_name = os.path.splitext(image_file)[0]
     with open(f'cleaned_text/{base_name}.txt', 'w', encoding='utf-8') as file:
         file.write(cleaned_text)
 
+    # Structure
     structured_api_response = get_structured_data_from_text(cleaned_text)
     structured_data = structured_api_response or {}
 
     if structured_data:
         structured_data["Name_of_file"] = image_file
-        structured_data["Page_Count"] = page_count
+        structured_data["Page_Count"] = 1
         structured_data["raw_text"] = raw_text
         structured_data["cleaned_text"] = cleaned_text
 
@@ -449,7 +495,10 @@ def main():
 
     if pdf_files:
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-            futures = {executor.submit(process_pdf, pdf_file, pdf_folder, pdf_image_output_folder): pdf_file for pdf_file in pdf_files}
+            futures = {
+                executor.submit(process_pdf, pdf_file, pdf_folder, pdf_image_output_folder): pdf_file
+                for pdf_file in pdf_files
+            }
             for future in concurrent.futures.as_completed(futures):
                 pdf_file = futures[future]
                 try:
@@ -461,7 +510,10 @@ def main():
 
     if image_files:
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-            futures = {executor.submit(process_image, image_file, image_input_folder, image_output_folder): image_file for image_file in image_files}
+            futures = {
+                executor.submit(process_image, image_file, image_input_folder, image_output_folder): image_file
+                for image_file in image_files
+            }
             for future in concurrent.futures.as_completed(futures):
                 image_file = futures[future]
                 try:
@@ -495,6 +547,4 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-
         print(f"Script generated an exception: {exc}")
-

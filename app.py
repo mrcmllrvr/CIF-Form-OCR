@@ -9,6 +9,8 @@ import pandas as pd
 import traceback
 import time
 import concurrent.futures
+import tempfile
+import hashlib
 from datetime import datetime
 
 st.set_page_config(page_title="CIF Form Data Intelligence Engine", layout="wide", initial_sidebar_state="expanded")
@@ -207,43 +209,32 @@ except Exception:
     MAIN_AVAILABLE = False
     _import_error = traceback.format_exc()
 
-# ---------- Folders ----------
-INPUT_FOLDER = os.path.join("input", "uploads")
+# ---------- Runtime folders (for derived artifacts only) ----------
 OUTPUT_PDF_IMAGES = os.path.join("output", "pdf_images")
 OUTPUT_PROCESSED_IMAGES = os.path.join("output", "processed_images")
 CLEANED_TEXT_FOLDER = "cleaned_text"
 
-os.makedirs(INPUT_FOLDER, exist_ok=True)
 os.makedirs("output", exist_ok=True)
 os.makedirs(OUTPUT_PDF_IMAGES, exist_ok=True)
 os.makedirs(OUTPUT_PROCESSED_IMAGES, exist_ok=True)
 os.makedirs(CLEANED_TEXT_FOLDER, exist_ok=True)
 
+# ---------- Session-scoped state ----------
+if "temp_dir" not in st.session_state:
+    st.session_state["temp_dir"] = tempfile.mkdtemp(prefix="cif_uploads_")
+if "uploads" not in st.session_state:
+    st.session_state["uploads"] = []  # list of {"name": str, "path": str, "digest": str}
+if "upload_index" not in st.session_state:
+    # maps file_digest -> {"name": str, "path": str}
+    st.session_state["upload_index"] = {}
+if "cache" not in st.session_state:
+    st.session_state["cache"] = {}
+if "selected_file_path" not in st.session_state:
+    st.session_state["selected_file_path"] = None
+if "has_new_uploads" not in st.session_state:
+    st.session_state["has_new_uploads"] = False
+
 # ---------- Helpers ----------
-def save_uploaded_files(uploaded_files):
-    paths = []
-    for up in uploaded_files:
-        save_path = os.path.join(INPUT_FOLDER, up.name)
-        with open(save_path, "wb") as f:
-            f.write(up.getbuffer())
-        paths.append(save_path)
-    return paths
-
-def process_permit(file_path):
-    ext = os.path.splitext(file_path)[1].lower()
-    if ext == ".pdf":
-        pdf_folder = os.path.dirname(file_path)
-        image_output_folder = OUTPUT_PDF_IMAGES
-        os.makedirs(image_output_folder, exist_ok=True)
-        return process_pdf(os.path.basename(file_path), pdf_folder, image_output_folder)
-    elif ext in [".png", ".jpg", ".jpeg"]:
-        image_folder = os.path.dirname(file_path)
-        image_output_folder = OUTPUT_PROCESSED_IMAGES
-        os.makedirs(image_output_folder, exist_ok=True)
-        return process_image(os.path.basename(file_path), image_folder, image_output_folder)
-    else:
-        raise ValueError(f"Unsupported file type: {ext}")
-
 def _file_sig(path):
     try:
         if not os.path.exists(path):
@@ -255,6 +246,13 @@ def _file_sig(path):
         return (stat.st_size, int(stat.st_mtime * 1000))
     except (FileNotFoundError, OSError):
         return None
+
+# NEW: original uploaded filename for a given temp path
+def _original_name_for_path(p: str) -> str:
+    for it in st.session_state.get("uploads", []):
+        if it.get("path") == p:
+            return it.get("name") or os.path.basename(p)
+    return os.path.basename(p)
 
 def excel_bytes_for_single_doc(data: dict) -> bytes:
     cols = [
@@ -271,28 +269,15 @@ def excel_bytes_for_single_doc(data: dict) -> bytes:
         "raw_text",
         "cleaned_text",
     ]
-
     row = {c: "" for c in cols}
-    row["Document_Type"] = data.get("Document_Type", "")
-    row["Page_Count"] = data.get("Page_Count", "")
-    row["Name_of_file"] = data.get("Name_of_file", "")
-    row["Last_Name"] = data.get("Last_Name", "")
-    row["First_Name"] = data.get("First_Name", "")
-    row["Suffix"] = data.get("Suffix", "")
-    row["Middle_Name"] = data.get("Middle_Name", "")
-    row["Date_of_Birth"] = data.get("Date_of_Birth", "")
-    row["Place_of_Birth_Town"] = data.get("Place_of_Birth_Town", "")
-    row["Place_of_Birth_Province"] = data.get("Place_of_Birth_Province", "")
-    row["raw_text"] = data.get("raw_text", "")
-    row["cleaned_text"] = data.get("cleaned_text", "")
-
+    for k in row.keys():
+        row[k] = data.get(k, "")
     df = pd.DataFrame([row], columns=cols)
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="extracted")
     buf.seek(0)
     return buf.read()
-
 
 def excel_bytes_for_all_docs(cache: dict) -> bytes:
     cols = [
@@ -310,25 +295,15 @@ def excel_bytes_for_all_docs(cache: dict) -> bytes:
         "cleaned_text",
     ]
     rows = []
-    for entry in cache.values():
+    # CHANGED: iterate items to get path, and override Name_of_file with original upload name
+    for path, entry in cache.items():
         data = (entry or {}).get("result")
         if not data:
             continue
-
         row = {c: "" for c in cols}
-        row["Document_Type"] = data.get("Document_Type", "")
-        row["Page_Count"] = data.get("Page_Count", "")
-        row["Name_of_file"] = data.get("Name_of_file", "")
-        row["Last_Name"] = data.get("Last_Name", "")
-        row["First_Name"] = data.get("First_Name", "")
-        row["Suffix"] = data.get("Suffix", "")
-        row["Middle_Name"] = data.get("Middle_Name", "")
-        row["Date_of_Birth"] = data.get("Date_of_Birth", "")
-        row["Place_of_Birth_Town"] = data.get("Place_of_Birth_Town", "")
-        row["Place_of_Birth_Province"] = data.get("Place_of_Birth_Province", "")
-        row["raw_text"] = data.get("raw_text", "")
-        row["cleaned_text"] = data.get("cleaned_text", "")
-
+        for k in row.keys():
+            row[k] = data.get(k, "")
+        row["Name_of_file"] = _original_name_for_path(path)
         rows.append(row)
 
     df = pd.DataFrame(rows, columns=cols)
@@ -338,186 +313,155 @@ def excel_bytes_for_all_docs(cache: dict) -> bytes:
     buf.seek(0)
     return buf.read()
 
-# ---------- Upload and Cache Management ----------
-uploaded_files = st.file_uploader("", type=["pdf", "png", "jpg", "jpeg"], accept_multiple_files=True)
+def process_permit(file_path):
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext == ".pdf":
+        pdf_folder = os.path.dirname(file_path)
+        image_output_folder = OUTPUT_PDF_IMAGES
+        os.makedirs(image_output_folder, exist_ok=True)
+        return process_pdf(os.path.basename(file_path), pdf_folder, image_output_folder)
+    elif ext in [".png", ".jpg", ".jpeg"]:
+        image_folder = os.path.dirname(file_path)
+        image_output_folder = OUTPUT_PROCESSED_IMAGES
+        os.makedirs(image_output_folder, exist_ok=True)
+        return process_image(os.path.basename(file_path), image_folder, image_output_folder)
+    else:
+        raise ValueError(f"Unsupported file type: {ext}")
 
-if "cache" not in st.session_state:
-    st.session_state["cache"] = {}
-
-if "selected_file_path" not in st.session_state:
-    st.session_state["selected_file_path"] = None
-
-if "uploaded_file_names" not in st.session_state:
-    st.session_state["uploaded_file_names"] = set()
+# ---------- Upload (temp files, non-persistent) ----------
+uploaded_files = st.file_uploader(
+    "Upload one or more files",
+    type=["pdf", "png", "jpg", "jpeg"],
+    accept_multiple_files=True
+)
 
 newly_uploaded = []
 if uploaded_files:
-    current_upload_names = set(f.name for f in uploaded_files)
-    
-    if current_upload_names != st.session_state["uploaded_file_names"]:
-        saved_paths = save_uploaded_files(uploaded_files)
-        newly_uploaded = saved_paths.copy()
-        st.session_state["uploaded_file_names"] = current_upload_names
-        st.success(f"Saved {len(saved_paths)} uploaded file(s) to `{INPUT_FOLDER}`")
-        
-        for path in newly_uploaded:
-            if path in st.session_state["cache"]:
-                del st.session_state["cache"][path]
+    for up in uploaded_files:
+        # compute MD5 fingerprint to dedupe across reruns
+        data = up.getvalue()  # bytes
+        digest = hashlib.md5(data).hexdigest()
+        if digest in st.session_state["upload_index"]:
+            # already saved this exact file in this session; skip
+            continue
+        suffix = os.path.splitext(up.name)[1]
+        with tempfile.NamedTemporaryFile(delete=False, dir=st.session_state["temp_dir"], suffix=suffix) as tmp:
+            tmp.write(data)
+            temp_path = tmp.name
+        entry = {"name": up.name, "path": temp_path, "digest": digest}
+        st.session_state["uploads"].append(entry)
+        st.session_state["upload_index"][digest] = {"name": up.name, "path": temp_path}
+        newly_uploaded.append(entry)
 
-if not MAIN_AVAILABLE:
-    st.error("Error importing processing functions from main.py – processing disabled.")
-    st.code(_import_error)
-    st.stop()
+    if newly_uploaded:
+        st.session_state["has_new_uploads"] = True
+        st.success(f"Saved {len(newly_uploaded)} new file(s) to a temporary session folder")
 
-all_files = sorted({os.path.join(INPUT_FOLDER, f) for f in os.listdir(INPUT_FOLDER) if os.path.isfile(os.path.join(INPUT_FOLDER, f))})
-if not all_files:
-    st.info("No files available. Upload a PDF or image above to get started.")
-    st.stop()
-
-def needs_processing(file_path):
+# ---------- Processing: ONLY when there are truly new uploads ----------
+def _needs_processing(file_path):
     current_sig = _file_sig(file_path)
     if current_sig is None:
         return False
-    
     cache_entry = st.session_state["cache"].get(file_path)
     if cache_entry is None:
         return True
-    
-    cached_sig = cache_entry.get("sig")
-    if cached_sig != current_sig:
+    if cache_entry.get("sig") != current_sig:
         return True
-    
     if cache_entry.get("result") is None:
         return True
-    
     return False
 
-def batch_process(paths, force_process=False):
+pending_paths = []
+if st.session_state["has_new_uploads"]:
+    for item in newly_uploaded:
+        p = item["path"]
+        if _needs_processing(p):
+            pending_paths.append(p)
+
+def _batch_process(paths):
     if not paths:
         return
-    
     progress_holder = st.empty()
     with st.spinner(f"Processing {len(paths)} document(s)…"):
         progress = progress_holder.progress(0, text="Starting…")
         completed, total = 0, len(paths)
-        
-        def process_single_file(p):
+
+        def _one(p):
             try:
                 return process_permit(p)
             except Exception as e:
                 st.warning(f"Failed to process {os.path.basename(p)}: {e}")
                 st.code(traceback.format_exc())
                 return None
-        
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, total)) as ex:
-            futures = {ex.submit(process_single_file, p): p for p in paths}
-            
+            futures = {ex.submit(_one, p): p for p in paths}
             for fut in concurrent.futures.as_completed(futures):
                 p = futures[fut]
                 res = fut.result()
-                
                 current_sig = _file_sig(p)
-                st.session_state["cache"][p] = {
-                    "sig": current_sig, 
-                    "result": res,
-                    "processed_at": time.time()
-                }
-                
+                st.session_state["cache"][p] = {"sig": current_sig, "result": res, "processed_at": time.time()}
                 completed += 1
-                progress.progress(int(completed/total*100), text=f"Processed {completed}/{total}")
+                progress.progress(int(completed / total * 100), text=f"Processed {completed}/{total}")
                 time.sleep(0.02)
-        
-        progress_holder.empty()
+    progress_holder.empty()
 
-if newly_uploaded:
-    time.sleep(0.3)
-    
-    verified_uploads = []
-    for p in newly_uploaded:
-        if os.path.exists(p) and os.path.getsize(p) > 0:
-            verified_uploads.append(p)
-        else:
-            st.warning(f"File {os.path.basename(p)} may not have been saved correctly")
-    newly_uploaded = verified_uploads
+if pending_paths:
+    _batch_process(pending_paths)
+    # we've consumed the new uploads; avoid reprocessing on button clicks
+    st.session_state["has_new_uploads"] = False
 
-pending = []
-for p in all_files:
-    if p in newly_uploaded:
-        pending.append(p)
-    elif needs_processing(p):
-        pending.append(p)
-
-if pending:
-    batch_process(pending)
-
-total = len(all_files)
-processed = sum(1 for p in all_files if st.session_state["cache"].get(p, {}).get("result") is not None)
-
+# ---------- Sidebar: Session-only Document List ----------
 with st.sidebar:
     st.title("📁 Document Library")
     st.divider()
 
-    col1, col2 = st.columns([0.5, 15.5])
-       
-    with col1:
-        st.markdown("", unsafe_allow_html=True)
-    
-    with col2:
-        st.markdown('<div class="sb-label"><b>Find document:</b></div>', unsafe_allow_html=True)
-        q = st.text_input("", placeholder="Search by filename..", key="sb_search")
+    st.markdown('<div class="sb-label"><b>Find document:</b></div>', unsafe_allow_html=True)
+    q = st.text_input("", placeholder="Search by filename..", key="sb_search")
 
-        if q:
-            filtered_files = [p for p in all_files if q.lower() in os.path.basename(p).lower()]
-            if filtered_files:
-                display_files = filtered_files
-            else:
-                st.info(f"No matches for '{q}'")
-                display_files = []
-        else:
-            display_files = all_files
+    session_files = st.session_state["uploads"]
+    if q:
+        display_files = [it for it in session_files if q.lower() in it["name"].lower()]
+        if not display_files:
+            st.info(f"No matches for '{q}'")
+    else:
+        display_files = session_files
 
-        st.markdown('<div class="sb-group">', unsafe_allow_html=True)
-        st.markdown('<div class="sb-label"><b>Select document:</b></div>', unsafe_allow_html=True)
+    st.markdown('<div class="sb-group">', unsafe_allow_html=True)
+    st.markdown('<div class="sb-label"><b>Select document:</b></div>', unsafe_allow_html=True)
 
-        if display_files:
-            selected_idx = st.radio(
-                "",
-                options=list(range(len(display_files))),
-                format_func=lambda i: os.path.basename(display_files[i]),
-                key="sb_file_select_idx",
+    if display_files:
+        selected_idx = st.radio(
+            "",
+            options=list(range(len(display_files))),
+            format_func=lambda i: display_files[i]["name"],
+            key="sb_file_select_idx",
+        )
+        selected_path = display_files[selected_idx]["path"]
+        if st.session_state["selected_file_path"] != selected_path:
+            st.session_state["selected_file_path"] = selected_path
+
+        # status line
+        entry = st.session_state["cache"].get(selected_path)
+        status_icon = "✓ Processed" if (entry and entry.get("result")) else (
+            "Not yet processed" if (entry and "result" in entry and entry.get("result") is None) else "Processing…"
+        )
+        if os.path.exists(selected_path):
+            stat = os.stat(selected_path)
+            file_kind = "PDF" if selected_path.lower().endswith(".pdf") else "Image"
+            size_kb = stat.st_size // 1024
+            st.markdown(
+                f'<div class="sb-help">Status: {status_icon} • Type: {file_kind} • Size: {size_kb} KB</div>',
+                unsafe_allow_html=True
             )
-            selected_path = display_files[selected_idx]
-            
-            if st.session_state["selected_file_path"] != selected_path:
-                st.session_state["selected_file_path"] = selected_path
-                
-        elif q:
-            st.info("Try a different search term")
-            selected_path = st.session_state.get("selected_file_path")
-        else:
-            st.info("No files available.")
-            selected_path = st.session_state.get("selected_file_path")
 
-        st.markdown('</div>', unsafe_allow_html=True)
+    else:
+        st.info("No files uploaded this session. Use the uploader above.")
 
-        if selected_path:
-            entry = st.session_state["cache"].get(selected_path)
-            status_icon = "✓ Processed" if (entry and entry.get("result")) else ("Not yet processed" if (entry and "result" in entry and entry.get("result") is None) else "Processing…")
-            
-            if os.path.exists(selected_path):
-                stat = os.stat(selected_path)
-                file_kind = "PDF" if selected_path.lower().endswith(".pdf") else "Image"
-                size_kb = stat.st_size // 1024
-                
-                st.markdown(
-                    f'<div class="sb-help">Status: {status_icon} • Type: {file_kind} • Size: {size_kb} KB</div>',
-                    unsafe_allow_html=True
-                )
+    st.divider()
 
-        st.divider()
-
+    # Export all from this session
     all_excel = excel_bytes_for_all_docs(st.session_state["cache"])
-
     st.download_button(
         "📥 Export All Data",
         data=all_excel,
@@ -609,7 +553,7 @@ with col3:
                 key=f"{file_key}_date_of_birth",
                 help="Format: mm-dd-yyyy"
             )
-            
+
             st.markdown("##### Place of Birth")
             place_of_birth_town = st.text_input(
                 "**Town/Municipality/City**",
@@ -634,7 +578,8 @@ with col3:
                         "Date_of_Birth": date_of_birth,
                         "Place_of_Birth_Town": place_of_birth_town,
                         "Place_of_Birth_Province": place_of_birth_province,
-                        "Name_of_file": os.path.basename(selected_path),
+                        # CHANGED: ensure Name_of_file is the ORIGINAL uploaded name
+                        "Name_of_file": _original_name_for_path(selected_path),
                     })
                     st.session_state["cache"][selected_path] = {"sig": _file_sig(selected_path), "result": updated}
                     result = updated
@@ -642,11 +587,15 @@ with col3:
 
             with bcol2:
                 current = st.session_state["cache"].get(selected_path, {"result": result})["result"]
-                excel_bytes = excel_bytes_for_single_doc(current)
+                # CHANGED: override Name_of_file for export to the original uploaded filename
+                if current:
+                    current = {**current, "Name_of_file": _original_name_for_path(selected_path)}
+                excel_bytes = excel_bytes_for_single_doc(current or {})
                 st.download_button(
                     "Export to Excel",
                     data=excel_bytes,
-                    file_name=f"{os.path.splitext(os.path.basename(selected_path))[0]}_extracted.xlsx",
+                    # CHANGED: filename now uses the ORIGINAL uploaded filename
+                    file_name=f"{_original_name_for_path(selected_path)}_extracted.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key=f"{file_key}_download_excel",
                 )
