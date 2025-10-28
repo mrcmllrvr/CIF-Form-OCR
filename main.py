@@ -164,13 +164,13 @@ def parse_structured_response(response_content):
 
 def get_structured_data_from_text(raw_text):
     system_prompt = """
-        You are an AI assistant specialized in extracting personal details from Philippine banking Customer Information File (CIF) forms.
+        You are an AI assistant specialized in extracting personal details from banking Customer Information File (CIF) forms.
 
         <user_task>
         ═══════════════════════════════════════════════════════════════
         1. PURPOSE AND OUTPUT REQUIREMENTS
         ═══════════════════════════════════════════════════════════════
-        1.1 Goal: Extract personal details from DBP Customer Information File Individual forms with absolute accuracy.
+        1.1 Goal: Extract personal details from Customer Information File Individual forms with absolute accuracy.
 
         Key Objectives:
         • Extract ONLY the specified personal detail fields
@@ -184,7 +184,7 @@ def get_structured_data_from_text(raw_text):
         • Missing fields must be explicitly labeled as "None"
         • Multi-page documents must be combined into a single structured JSON object
         • No assumptions or inferences: Only extract what is explicitly visible
-        • Preserve exact spelling of Filipino names
+        • Preserve exact spelling of names
         • ALL dates must be in mm-dd-yyyy format (e.g., 03-15-2024, 01-01-1990)
         • NEVER infer or calculate dates from partial information
 
@@ -197,7 +197,7 @@ def get_structured_data_from_text(raw_text):
         • First Name: Extract from "First Name" field
         • Suffix: Extract from "Suffix" field (e.g., Jr., Sr., III, IV)
         • Middle Name: Extract from "Middle Name" field
-        • Preserve exact spelling from the form, but normalize capitalization so each word begins with a capital letter (e.g., ‘Dela Cruz’, ‘Juan’)
+        • Preserve exact spelling from the form, but normalize capitalization so each word begins with a capital letter (e.g., "Dela Cruz", "Juan", "Santos")
         • Include all components even if handwritten
 
         2.2 Date of Birth:
@@ -299,7 +299,7 @@ def get_structured_data_from_text(raw_text):
         2. Final Answer:
         Present your final JSON answer in <answer> tags after analysis.
 
-    """
+    """.strip()
     try:
         data = {
             "messages": [
@@ -497,3 +497,4 @@ if __name__ == "__main__":
     except Exception as exc:
 
         print(f"Script generated an exception: {exc}")
+
