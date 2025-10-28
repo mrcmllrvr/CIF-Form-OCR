@@ -197,7 +197,7 @@ def get_structured_data_from_text(raw_text):
         • First Name: Extract from "First Name" field
         • Suffix: Extract from "Suffix" field (e.g., Jr., Sr., III, IV)
         • Middle Name: Extract from "Middle Name" field
-        • Preserve exact capitalization and spelling
+        • Preserve exact spelling from the form, but normalize capitalization so each word begins with a capital letter (e.g., ‘Dela Cruz’, ‘Juan’)
         • Include all components even if handwritten
 
         2.2 Date of Birth:
@@ -211,7 +211,7 @@ def get_structured_data_from_text(raw_text):
         • Town/Municipality/City: Extract from the first field under "Place of Birth"
         • Province/Country: Extract from the second field under "Place of Birth"
         • May be handwritten
-        • Preserve exact spelling for Philippine place names
+        • Preserve exact spelling and correct capitalization for all place names worldwide (e.g., "Manila", "Los Angeles", "Tokyo")
 
         ═══════════════════════════════════════════════════════════════
         3. OUTPUT FORMAT
@@ -495,4 +495,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
+
         print(f"Script generated an exception: {exc}")
