@@ -46,6 +46,15 @@ div[data-testid="stTextArea"] label {
     font-weight: 800 !important;
 }
 
+/* ===== TEXT INPUT COLOR ===== */
+div[data-testid="stTextInput"] input {
+    color: #2563EB !important;
+}
+
+div[data-testid="stTextArea"] textarea {
+    color: #2563EB !important;
+}
+
 /* ===== SIDEBAR BUTTONS ===== */
 [data-testid="stSidebar"] .stButton,
 [data-testid="stSidebar"] .stDownloadButton {
@@ -132,7 +141,7 @@ button[data-testid*="dl_raw"] {
   background: #f54f4f !important;
   border: 1px solid #f54f4f !important;
   color: #FFFFFF !important;
-  box-shadow: 0 2px 4px rgba(245, 79, 79, 0.2) !important;
+  box-shadow: 0 2px 4px rgba(37, 99, 235, 0.2) !important;
   transition: all 0.2s ease !important;
   font-weight: 500 !important;
   font-size: 0.9rem !important;
@@ -149,7 +158,7 @@ button[data-testid*="dl_raw"]:hover {
   background: #BF4342 !important;
   border-color: #BF4342 !important;
   transform: translateY(-1px) !important;
-  box-shadow: 0 4px 8px rgba(191, 67, 66, 0.3) !important;
+  box-shadow: 0 4px 8px rgba(29, 78, 216, 0.3) !important;
 }
 
 /* Secondary buttons */
@@ -174,11 +183,11 @@ button[data-testid*="clear"] {
 .stButton > button[kind="secondary"]:hover,
 button[data-testid*="reprocess"]:hover,
 button[data-testid*="clear"]:hover {
-  background: #BF4342 !important;
-  border-color: #BF4342 !important;
+  background: #f54f4f !important;
+  border-color: #f54f4f !important;
   color: #FFFFFF !important;
   transform: translateY(-1px) !important;
-  box-shadow: 0 4px 8px rgba(191, 67, 66, 0.3) !important;
+  box-shadow: 0 4px 8px rgba(37, 99, 235, 0.3) !important;
 }
 
 /* Container fixes */
